@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-import sqlite3
-from os import environ
-from datetime import datetime
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from dataclasses import dataclass
+## @file
+# @brief telegram-бот для напоминания о несделанных заданиях
+# @author Kuronen Arsenii
+# @date 2025
 import re
+from os import environ
+from dataclasses import dataclass
+import sqlite3
+from datetime import datetime
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 DB_NAME = "tasks.db"
 
+## @class Task
+#  @brief The task class.
+#  @details It is used for storing information about a task: its title, deadline, state and note.
 @dataclass
 class Task:
     id: int
@@ -17,14 +24,31 @@ class Task:
     done: bool = False
     note: str = ""
 
-class TaskStorage:
+## @class BaseStorage
+#  @brief Base storage class.
+#  @details It is used for basic database processing: connecting and disconnecting.
+class BaseStorage:
+    ## @brief Database initializer.
+    #  @param db_name Database name
     def __init__(self, db_name=DB_NAME):
-        self.conn = sqlite3.connect(db_name)
+        self.conn = sqlite3.connect(db_name, check_same_thread=False)
         self.cursor = self.conn.cursor()
 
+    ## @brief Close database.
+    def close(self):
+        self.conn.close()
+
+## @class TaskStorage
+#  @brief Task storage class.
+#  @details It is used for common working with tasks: adding, removing and listing. Inherits the basic functions from BaseStorage.
+class TaskStorage(BaseStorage):
+    ## @brief Returns the table name by user_id.
+    #  @param user_id ID of a user
     def _table_name(self, user_id: int) -> str:
         return f'USER_{user_id}'
 
+    ## @brief Creates a table if it does not exist
+    #  @param user_id ID of a user
     def ensure_user_table(self, user_id: int):
         table = self._table_name(user_id)
         self.cursor.execute(f"""
@@ -38,6 +62,10 @@ class TaskStorage:
         """)
         self.conn.commit()
 
+    ## @brief Adds a task
+    #  @param user_id ID of a user
+    #  @param title sets a title of the task
+    #  @param due_datetime sets a deadline of the task
     def add_task(self, user_id: int, title: str, due_datetime: str):
         print('[LOG] Task add')
         self.ensure_user_table(user_id)
@@ -48,6 +76,8 @@ class TaskStorage:
         )
         self.conn.commit()
 
+    ## @brief Lists the tasks of a specific user
+    #  @param user_id ID of a user
     def list_tasks(self, user_id: int):
         print(f'[LOG] Get tasks of {user_id}')
         table = self._table_name(user_id)
@@ -55,12 +85,19 @@ class TaskStorage:
         self.cursor.execute(f"SELECT id, title, due_datetime, done FROM {table}")
         return self.cursor.fetchall()
 
+    ## @brief marks a task as done or undone depending on `done` parameter
+    #  @param user_id ID of a user
+    #  @param task_id ID of a task
+    #  @param done state of a task
     def mark_done(self, user_id: int, task_id: int, done=True):
         print(f'[LOG] Done {task_id} by {user_id}')
         table = self._table_name(user_id)
         self.cursor.execute(f"UPDATE {table} SET done = ? WHERE id = ?", (int(done), task_id))
         self.conn.commit()
 
+    ## @brief deletes a task
+    #  @param user_id ID of a user
+    #  @param task_id ID of a task
     def delete_task(self, user_id: int, task_id: int):
         print(f'[LOG] Delete {task_id} by {user_id}')
         table = self._table_name(user_id)
@@ -72,6 +109,7 @@ class TaskStorage:
             self.cursor.execute(f"DROP TABLE {table}")
             self.conn.commit()
 
+    ## @brief gets all the users stored in the database
     def get_all_user_ids(self):
         self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = self.cursor.fetchall()
@@ -82,17 +120,18 @@ class TaskStorage:
                 user_ids.append(int(match.group(1)))
         return user_ids
 
+    ## @brief gets all the pending tasks
     def get_pending_tasks(self, user_id: int):
         table = self._table_name(user_id)
         self.ensure_user_table(user_id)
         self.cursor.execute(f"SELECT id, title, due_datetime FROM {table} WHERE done = 0")
         return self.cursor.fetchall()
 
-    def close(self):
-        self.conn.close()
-
 storage = TaskStorage()
 
+## @brief Creates a new task
+#  @param update telegram state update
+#  @param context context of a command
 async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if len(context.args) < 3:
@@ -108,6 +147,9 @@ async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage.add_task(user_id, title, due.isoformat())
     await update.message.reply_text(f"Задание '{title}' добавлено!")
 
+## @brief Lists all the tasks
+#  @param update telegram state update
+#  @param context context of a command
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     rows = storage.list_tasks(user_id)
@@ -117,6 +159,9 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "Ваши задания:\n" + '\n'.join(map(lambda task: f"{task[0]}. {task[1]} — {task[2]} " + ("✅" if task[3] else "❌"), rows))
     await update.message.reply_text(msg)
 
+## @brief Marks a task as done
+#  @param update telegram state update
+#  @param context context of a command
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -125,6 +170,9 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage.mark_done(user_id, int(context.args[0]), True)
     await update.message.reply_text("Задание отмечено как выполненное!")
 
+## @brief Marks a task as undone
+#  @param update telegram state update
+#  @param context context of a command
 async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -133,6 +181,9 @@ async def undone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage.mark_done(user_id, int(context.args[0]), False)
     await update.message.reply_text("Задание снова активное.")
 
+## @brief Removes a task
+#  @param update telegram state update
+#  @param context context of a command
 async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -141,18 +192,24 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storage.delete_task(user_id, int(context.args[0]))
     await update.message.reply_text("Задание удалено.")
 
+## @brief Stops the bot
+#  @param update telegram state update
+#  @param context context of a command
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот остановлен. До встречи!")
     storage.close()
     await context.application.stop()
 
+## @brief Shows the help message with commands
+#  @param update telegram state update
+#  @param context context of a command
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Команды:\n/done <Номер задания>, /undone <Номер задания> - Пометить задание сделанным/несделанным\n' + \
             "/help - Показать это сообщение\n/new <ДД:ММ:ГГГГ ЧЧ:мм> <Описание задания>\n" + \
             "/delete <Номер задания> - удалить задание\n/tasks - показать список заданий\n/stop - остановить бота (для разработчиков)")
 
-bot = Bot(token=environ['TGBOTTOKEN'])
-
+## @brief Creates the coroutine reminding about the tasks
+#  @param context context of a command
 async def reminder_task(context: ContextTypes.DEFAULT_TYPE):
     print("[LOG] Reminder job is running...")
     local_storage = TaskStorage()
