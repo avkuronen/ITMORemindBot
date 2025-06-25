@@ -2,9 +2,10 @@
 import sqlite3
 from os import environ
 from datetime import datetime
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from dataclasses import dataclass
+import re
 
 DB_NAME = "tasks.db"
 
@@ -38,6 +39,7 @@ class TaskStorage:
         self.conn.commit()
 
     def add_task(self, user_id: int, title: str, due_datetime: str):
+        print('[LOG] Task add')
         self.ensure_user_table(user_id)
         table = self._table_name(user_id)
         self.cursor.execute(
@@ -47,17 +49,20 @@ class TaskStorage:
         self.conn.commit()
 
     def list_tasks(self, user_id: int):
+        print(f'[LOG] Get tasks of {user_id}')
         table = self._table_name(user_id)
         self.ensure_user_table(user_id)
         self.cursor.execute(f"SELECT id, title, due_datetime, done FROM {table}")
         return self.cursor.fetchall()
 
     def mark_done(self, user_id: int, task_id: int, done=True):
+        print(f'[LOG] Done {task_id} by {user_id}')
         table = self._table_name(user_id)
         self.cursor.execute(f"UPDATE {table} SET done = ? WHERE id = ?", (int(done), task_id))
         self.conn.commit()
 
     def delete_task(self, user_id: int, task_id: int):
+        print(f'[LOG] Delete {task_id} by {user_id}')
         table = self._table_name(user_id)
         self.cursor.execute(f"DELETE FROM {table} WHERE id = ?", (task_id,))
         self.conn.commit()
@@ -66,6 +71,22 @@ class TaskStorage:
         if count == 0:
             self.cursor.execute(f"DROP TABLE {table}")
             self.conn.commit()
+
+    def get_all_user_ids(self):
+        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = self.cursor.fetchall()
+        user_ids = []
+        for (table_name,) in tables:
+            match = re.match(r"USER_(\d+)", table_name)
+            if match:
+                user_ids.append(int(match.group(1)))
+        return user_ids
+
+    def get_pending_tasks(self, user_id: int):
+        table = self._table_name(user_id)
+        self.ensure_user_table(user_id)
+        self.cursor.execute(f"SELECT id, title, due_datetime FROM {table} WHERE done = 0")
+        return self.cursor.fetchall()
 
     def close(self):
         self.conn.close()
@@ -93,10 +114,7 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("У вас нет заданий.")
         return
-    msg = "Ваши задания:\n"
-    for task in rows:
-        status = "✅" if task[3] else "❌"
-        msg += f"{task[0]}. {task[1]} — {task[2]} {status}\n"
+    msg = "Ваши задания:\n" + '\n'.join(map(lambda task: f"{task[0]}. {task[1]} — {task[2]} " + ("✅" if task[3] else "❌"), rows))
     await update.message.reply_text(msg)
 
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,20 +145,36 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот остановлен. До встречи!")
     storage.close()
     await context.application.stop()
-    exit(0)
+
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Команды:\n/done <Номер задания>, /undone <Номер задания> - Пометить задание сделанным/несделанным\n' + \
+            "/help - Показать это сообщение\n/new <ДД:ММ:ГГГГ ЧЧ:мм> <Описание задания>\n" + \
+            "/delete <Номер задания> - удалить задание\n/tasks - показать список заданий\n/stop - остановить бота (для разработчиков)")
+
+bot = Bot(token=environ['TGBOTTOKEN'])
+
+async def reminder_task(context: ContextTypes.DEFAULT_TYPE):
+    print("[LOG] Reminder job is running...")
+    local_storage = TaskStorage()
+    user_ids = local_storage.get_all_user_ids()
+    for user_id in user_ids:
+        tasks = local_storage.get_pending_tasks(user_id)
+        if tasks:
+            message = "Напоминание! У вас есть невыполненные задачи:\n" + '\n'.join(map(lambda t: f"{t[0]}. {t[1]} — {t[2]}\n", tasks))
+            try:
+                await app.bot.send_message(chat_id=user_id, text=message)
+            except Exception as e:
+                print(f"[ERROR] Не удалось отправить сообщение {user_id}: {e}")
+    local_storage.close()
+
 
 app = ApplicationBuilder().token(environ['TGBOTTOKEN']).build()
-
 app.add_handler(CommandHandler("new", new))
 app.add_handler(CommandHandler("tasks", tasks))
 app.add_handler(CommandHandler("done", done))
 app.add_handler(CommandHandler("undone", undone))
 app.add_handler(CommandHandler("delete", delete))
 app.add_handler(CommandHandler("stop", stop))
-
+app.add_handler(CommandHandler("help", help))
+app.job_queue.run_repeating(reminder_task, interval=6 * 60 * 60, first=10)
 app.run_polling()
-
-
-
-
-
